@@ -13,7 +13,8 @@ Output is **standard GeoJSON** (WGS84 / EPSG:4326), directly consumable by OpenL
 
 ## Endpoints
 
-Base URL: `https://api-fov-{PROJECT_NUMBER}.europe-west1.run.app`
+**Production:** `https://api-fov-rcpywurt6q-ew.a.run.app`
+**Swagger UI:** [https://api-fov-rcpywurt6q-ew.a.run.app/docs](https://api-fov-rcpywurt6q-ew.a.run.app/docs)
 
 | Method | Path | Description |
 |--------|------|-------------|
