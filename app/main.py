@@ -85,7 +85,7 @@ async def by_flight(req: ByFlightRequest):
         # 1. Fetch image coordinates by inspection_id (+ optional mission)
         params: dict[str, str] = {
             "inspection_id": req.inspection_id,
-            "limit": "20000",
+            "limit": "10000",
             "include_metadata_raw": "false",
         }
         if req.mission:
