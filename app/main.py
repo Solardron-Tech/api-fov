@@ -115,17 +115,26 @@ async def by_flight(req: ByFlightRequest):
         for m in missions:
             mission_name = m["mission"]
 
-            # Fetch images + inferences (viewer endpoint auto-paginates)
-            viewer_url = (
+            # Fetch ALL images + inferences with pagination
+            viewer_base = (
                 f"{POSTGRES_BASE}/inferencias/viewer/inspections/"
                 f"{req.inspection_id}/missions/{mission_name}/imagenes-inferencias"
             )
-            viewer_resp = await client.get(viewer_url)
-            if viewer_resp.status_code != 200:
-                continue
-
-            viewer_data = viewer_resp.json()
-            viewer_items = viewer_data.get("items", [])
+            viewer_items: list = []
+            offset = 0
+            page_size = 500
+            while True:
+                viewer_resp = await client.get(
+                    viewer_base, params={"limit": str(page_size), "offset": str(offset)}
+                )
+                if viewer_resp.status_code != 200:
+                    break
+                page_data = viewer_resp.json()
+                page_items = page_data.get("items", [])
+                viewer_items.extend(page_items)
+                if len(page_items) < page_size:
+                    break
+                offset += page_size
 
             # Fetch image coordinates for this mission
             img_params: dict[str, str] = {
