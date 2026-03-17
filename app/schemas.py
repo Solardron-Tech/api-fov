@@ -45,9 +45,7 @@ class BatchRequest(BaseModel):
 
 
 class ByFlightRequest(BaseModel):
-    informe_id: str = Field(min_length=1)
-    mission: Optional[str] = None
-    bucket: Optional[str] = None
-    bucket_prefix: Optional[str] = None
+    inspection_id: str = Field(min_length=1, description="Inspection UUID (FK → inspections.id)")
+    mission: Optional[str] = Field(default=None, description="Mission/folder name (null = all missions)")
     fov_degrees: float = Field(default=70.0, gt=0, le=180)
     radius_meters: float = Field(default=1.66, gt=0, le=100)

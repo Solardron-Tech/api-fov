@@ -147,16 +147,14 @@ Each feature has `properties.image_id` linking it back to its source image.
 
 ### `POST /by-flight` — From database
 
-Fetches image coordinates and inferences from the PostgreSQL API, then computes FOV + rays.
+Fetches image coordinates and inferences from the PostgreSQL API using `inspection_id`, then computes FOV + rays. The GCS paths (`gs_path`) are read directly from each image record — no bucket/prefix needed.
 
 **Request:**
 
 ```json
 {
-  "informe_id": "rbyUchz5DeuXIs97dTct",
+  "inspection_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "mission": "DJI_202503011230_001",
-  "bucket": "sentinel-reports",
-  "bucket_prefix": "rbyUchz5DeuXIs97dTct_stillhouse/flight-validated/",
   "fov_degrees": 70,
   "radius_meters": 1.66
 }
@@ -164,10 +162,8 @@ Fetches image coordinates and inferences from the PostgreSQL API, then computes 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `informe_id` | string | **required** | Informe ID for the flight |
+| `inspection_id` | string | **required** | Inspection UUID (FK → inspections.id) |
 | `mission` | string | null | Mission/folder name (null = all missions) |
-| `bucket` | string | null | GCS bucket name (needed for inference matching) |
-| `bucket_prefix` | string | null | GCS bucket prefix |
 | `fov_degrees` | float | 70 | FOV angle |
 | `radius_meters` | float | 1.66 | Projection distance |
 
@@ -182,8 +178,9 @@ Fetches image coordinates and inferences from the PostgreSQL API, then computes 
     "total_features": 2400,
     "elapsed_ms": 120,
     "source": "database",
-    "informe_id": "rbyUchz5DeuXIs97dTct",
-    "mission": "DJI_202503011230_001"
+    "inspection_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "mission": "DJI_202503011230_001",
+    "flight_paths": ["gs://sentinel-reports/prefix/mission/"]
   }
 }
 ```

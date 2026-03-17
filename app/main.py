@@ -82,9 +82,9 @@ def batch(req: BatchRequest):
 @app.post("/by-flight")
 async def by_flight(req: ByFlightRequest):
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # 1. Fetch image coordinates
-        params = {
-            "informe_id": req.informe_id,
+        # 1. Fetch image coordinates by inspection_id (+ optional mission)
+        params: dict[str, str] = {
+            "inspection_id": req.inspection_id,
             "limit": "20000",
             "include_metadata_raw": "false",
         }
@@ -104,12 +104,14 @@ async def by_flight(req: ByFlightRequest):
                 "metadata": {"total_images": 0, "total_features": 0, "elapsed_ms": 0},
             }
 
-        # Parse DB rows → coordinate map
-        coords_by_file: dict[str, dict] = {}
+        # Parse DB rows → coordinate map, keyed by gs_path
+        coords_by_gs: dict[str, dict] = {}
+        flight_paths: set[str] = set()
+
         for item in items:
             geom = item.get("geom")
-            filename = item.get("nombre_archivo", "")
-            if not geom or not geom.get("coordinates") or not filename:
+            gs_path = item.get("gs_path", "")
+            if not geom or not geom.get("coordinates") or not gs_path:
                 continue
 
             heading = item.get("yaw")
@@ -128,36 +130,37 @@ async def by_flight(req: ByFlightRequest):
             if not is_visual:
                 continue
 
-            file_path = _build_gcs_path(
-                req.bucket, req.bucket_prefix, req.mission, filename
-            )
-            coords_by_file[file_path] = {
+            coords_by_gs[gs_path] = {
                 "lat": geom["coordinates"][1],
                 "lon": geom["coordinates"][0],
                 "heading": heading,
                 "image_width": w or 4000,
-                "file": filename,
+                "file": item.get("nombre_archivo", gs_path.rsplit("/", 1)[-1]),
             }
 
-        # 2. Fetch inferences
-        inferences_by_file: dict[str, list] = {}
-        flight_path = _build_gcs_path(req.bucket, req.bucket_prefix, req.mission)
-        if flight_path:
+            # Derive flight_path (directory) for inference lookup
+            # gs://bucket/prefix/mission/image.jpg → gs://bucket/prefix/mission/
+            dir_path = gs_path.rsplit("/", 1)[0] + "/"
+            flight_paths.add(dir_path)
+
+        # 2. Fetch inferences for each unique flight_path
+        inferences_by_uri: dict[str, list] = {}
+        for fp in flight_paths:
             inf_resp = await client.get(
                 f"{POSTGRES_BASE}/inferencias/by-flight/",
-                params={"flight_path": flight_path, "limit": "50000"},
+                params={"flight_path": fp, "limit": "50000"},
             )
             if inf_resp.status_code == 200:
                 inf_data = inf_resp.json()
                 inf_items = inf_data if isinstance(inf_data, list) else inf_data.get("items", [])
                 for inf in inf_items:
                     uri = inf.get("uri_imagen", "")
-                    inferences_by_file.setdefault(uri, []).append(inf)
+                    inferences_by_uri.setdefault(uri, []).append(inf)
 
         # 3. Build images with detections
         images = []
-        for file_path, coord in coords_by_file.items():
-            infs = inferences_by_file.get(file_path, [])
+        for gs_path, coord in coords_by_gs.items():
+            infs = inferences_by_uri.get(gs_path, [])
             images.append({
                 "image_id": coord["file"],
                 "lat": coord["lat"],
@@ -173,18 +176,7 @@ async def by_flight(req: ByFlightRequest):
         # 4. Compute
         result = build_feature_collection(images, req.fov_degrees, req.radius_meters)
         result["metadata"]["source"] = "database"
-        result["metadata"]["informe_id"] = req.informe_id
+        result["metadata"]["inspection_id"] = req.inspection_id
         result["metadata"]["mission"] = req.mission or "all"
+        result["metadata"]["flight_paths"] = list(flight_paths)
         return result
-
-
-def _build_gcs_path(
-    bucket: str | None,
-    prefix: str | None,
-    mission: str | None,
-    filename: str | None = None,
-) -> str:
-    if not bucket or not prefix:
-        return ""
-    base = f"gs://{bucket}/{prefix}{mission + '/' if mission else ''}"
-    return base + filename if filename else base
