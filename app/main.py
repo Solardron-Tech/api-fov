@@ -81,102 +81,127 @@ def batch(req: BatchRequest):
 
 @app.post("/by-flight")
 async def by_flight(req: ByFlightRequest):
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # 1. Fetch image coordinates by inspection_id (+ optional mission)
-        params: dict[str, str] = {
-            "inspection_id": req.inspection_id,
-            "limit": "10000",
-            "include_metadata_raw": "false",
-        }
-        if req.mission:
-            params["mission"] = req.mission
+    """
+    Fetch images + inferences via the viewer endpoint, then compute FOV.
+    Only includes images that have detections (optionally filtered by clase).
+    """
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # 1. Get missions summary to know which missions have inferences
+        summary_url = f"{POSTGRES_BASE}/inferencias/viewer/inspections/{req.inspection_id}/missions-summary"
+        summary_resp = await client.get(summary_url)
+        if summary_resp.status_code != 200:
+            raise HTTPException(502, f"missions-summary returned {summary_resp.status_code}")
 
-        img_resp = await client.get(f"{POSTGRES_BASE}/imagenes/", params=params)
-        if img_resp.status_code != 200:
-            raise HTTPException(502, f"imagenes API returned {img_resp.status_code}")
-
-        img_data = img_resp.json()
-        items = img_data.get("items", [])
-        if not items:
+        summary = summary_resp.json()
+        missions = summary.get("missions", [])
+        if not missions:
             return {
                 "type": "FeatureCollection",
                 "features": [],
                 "metadata": {"total_images": 0, "total_features": 0, "elapsed_ms": 0},
             }
 
-        # Parse DB rows → coordinate map, keyed by gs_path
-        coords_by_gs: dict[str, dict] = {}
-        flight_paths: set[str] = set()
+        # Filter missions if specified
+        if req.mission:
+            missions = [m for m in missions if m["mission"] == req.mission]
 
-        for item in items:
-            geom = item.get("geom")
-            gs_path = item.get("gs_path", "")
-            if not geom or not geom.get("coordinates") or not gs_path:
-                continue
+        # Only missions with inferences
+        missions = [m for m in missions if m.get("inferencia_count", 0) > 0]
 
-            heading = item.get("yaw")
-            roll = item.get("roll")
-            if heading is not None and roll is not None:
-                norm_roll = ((roll + 180) % 360) - 180
-                if abs(norm_roll) > 90:
-                    heading = (heading + 180) % 360
-            if heading is None:
-                continue
+        # 2. For each mission, fetch images with their inferences via viewer endpoint
+        # Also fetch image metadata (coordinates, yaw) from imagenes API
+        images_for_fov: list[dict] = []
 
-            # Only visual images (FOV applies to RGB camera)
-            sensor = (item.get("tipo_sensor") or "").upper()
-            w = item.get("resolucion_ancho") or 0
-            is_visual = sensor in ("RGB", "VISUAL") or w >= 3000
-            if not is_visual:
-                continue
+        for m in missions:
+            mission_name = m["mission"]
 
-            coords_by_gs[gs_path] = {
-                "lat": geom["coordinates"][1],
-                "lon": geom["coordinates"][0],
-                "heading": heading,
-                "image_width": w or 4000,
-                "file": item.get("nombre_archivo", gs_path.rsplit("/", 1)[-1]),
-            }
-
-            # Derive flight_path (directory) for inference lookup
-            # gs://bucket/prefix/mission/image.jpg → gs://bucket/prefix/mission/
-            dir_path = gs_path.rsplit("/", 1)[0] + "/"
-            flight_paths.add(dir_path)
-
-        # 2. Fetch inferences for each unique flight_path
-        inferences_by_uri: dict[str, list] = {}
-        for fp in flight_paths:
-            inf_resp = await client.get(
-                f"{POSTGRES_BASE}/inferencias/by-flight/",
-                params={"flight_path": fp, "limit": "50000"},
+            # Fetch images + inferences (viewer endpoint auto-paginates)
+            viewer_url = (
+                f"{POSTGRES_BASE}/inferencias/viewer/inspections/"
+                f"{req.inspection_id}/missions/{mission_name}/imagenes-inferencias"
             )
-            if inf_resp.status_code == 200:
-                inf_data = inf_resp.json()
-                inf_items = inf_data if isinstance(inf_data, list) else inf_data.get("items", [])
-                for inf in inf_items:
-                    uri = inf.get("uri_imagen", "")
-                    inferences_by_uri.setdefault(uri, []).append(inf)
+            viewer_resp = await client.get(viewer_url)
+            if viewer_resp.status_code != 200:
+                continue
 
-        # 3. Build images with detections
-        images = []
-        for gs_path, coord in coords_by_gs.items():
-            infs = inferences_by_uri.get(gs_path, [])
-            images.append({
-                "image_id": coord["file"],
-                "lat": coord["lat"],
-                "lon": coord["lon"],
-                "heading": coord["heading"],
-                "image_width": coord["image_width"],
-                "detections": [
-                    {"id": str(inf.get("id", "")), "bbox_xywh": inf.get("bbox_xywh", [])}
-                    for inf in infs
-                ],
-            })
+            viewer_data = viewer_resp.json()
+            viewer_items = viewer_data.get("items", [])
 
-        # 4. Compute
-        result = build_feature_collection(images, req.fov_degrees, req.radius_meters)
+            # Fetch image coordinates for this mission
+            img_params: dict[str, str] = {
+                "inspection_id": req.inspection_id,
+                "mission": mission_name,
+                "limit": "10000",
+            }
+            img_resp = await client.get(f"{POSTGRES_BASE}/imagenes/", params=img_params)
+            if img_resp.status_code != 200:
+                continue
+
+            img_data = img_resp.json()
+            # Build lookup: image_id → {lat, lon, heading, width}
+            coords_by_id: dict[int, dict] = {}
+            for item in img_data.get("items", []):
+                geom = item.get("geom")
+                if not geom or not geom.get("coordinates"):
+                    continue
+
+                heading = item.get("yaw")
+                roll = item.get("roll")
+                if heading is not None and roll is not None:
+                    norm_roll = ((roll + 180) % 360) - 180
+                    if abs(norm_roll) > 90:
+                        heading = (heading + 180) % 360
+                if heading is None:
+                    continue
+
+                # Only visual images
+                sensor = (item.get("tipo_sensor") or "").upper()
+                w = item.get("resolucion_ancho") or 0
+                if sensor not in ("RGB", "VISUAL") and w < 3000:
+                    continue
+
+                coords_by_id[item["id"]] = {
+                    "lat": geom["coordinates"][1],
+                    "lon": geom["coordinates"][0],
+                    "heading": heading,
+                    "image_width": w or 4000,
+                }
+
+            # 3. Build FOV input: only images with detections
+            for img in viewer_items:
+                image_id = img.get("id")
+                coord = coords_by_id.get(image_id)
+                if not coord:
+                    continue
+
+                infs = img.get("inferencias", [])
+                # Filter by clase if specified
+                if req.clase:
+                    infs = [inf for inf in infs if inf.get("clase") == req.clase]
+
+                if not infs:
+                    continue  # Skip images without matching detections
+
+                images_for_fov.append({
+                    "image_id": str(image_id),
+                    "lat": coord["lat"],
+                    "lon": coord["lon"],
+                    "heading": coord["heading"],
+                    "image_width": coord["image_width"],
+                    "detections": [
+                        {
+                            "id": str(inf.get("id", "")),
+                            "bbox_xywh": inf.get("bbox_xywh", []),
+                        }
+                        for inf in infs
+                    ],
+                })
+
+        # 4. Compute FOV
+        result = build_feature_collection(images_for_fov, req.fov_degrees, req.radius_meters)
         result["metadata"]["source"] = "database"
         result["metadata"]["inspection_id"] = req.inspection_id
         result["metadata"]["mission"] = req.mission or "all"
-        result["metadata"]["flight_paths"] = list(flight_paths)
+        if req.clase:
+            result["metadata"]["clase"] = req.clase
         return result

@@ -6,6 +6,7 @@ from typing import Optional
 
 class Detection(BaseModel):
     id: Optional[str] = None
+    clase: Optional[str] = None
     bbox_xywh: list[float] = Field(
         default_factory=lambda: [0.5, 0.5, 0.1, 0.1],
         description="[x, y, w, h] — normalized (0-1) or pixel coords",
@@ -47,5 +48,6 @@ class BatchRequest(BaseModel):
 class ByFlightRequest(BaseModel):
     inspection_id: str = Field(min_length=1, description="Inspection UUID (FK → inspections.id)")
     mission: Optional[str] = Field(default=None, description="Mission/folder name (null = all missions)")
+    clase: Optional[str] = Field(default=None, description="Filter detections by class (e.g. 'pile', 'mc4')")
     fov_degrees: float = Field(default=70.0, gt=0, le=180)
     radius_meters: float = Field(default=1.66, gt=0, le=100)

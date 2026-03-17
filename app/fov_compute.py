@@ -113,6 +113,7 @@ def build_image_features(
                 "feature_type": "detection_ray",
                 "image_id": image.get("image_id"),
                 "detection_id": det.get("id"),
+                "clase": det.get("clase"),
                 "norm_x": norm_x,
             },
         })
